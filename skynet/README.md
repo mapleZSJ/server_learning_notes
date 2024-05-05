@@ -68,3 +68,55 @@ Actor - 本质上是做功能抽象  <br>
 skynet通过newservice()、uniqueservice()启动进程，一般会在skynet启动的时候提前启动actor，因为这两个方法都是阻塞的操作   <br>
 
 
+<br/>
+
+
+### skynet底层运行原理
+
+1 fd怎么绑定actor    <br>
+
+socket.start(fd，func) --【socket.lua文件】   <br>
+监听端口时，传 listenfd、回调函数 两个参数；用户连接时，只需要绑定，只传clientfd(绑定 clientfd agent 网络消息)   <br>
+
+```
+function socket.start(id,func)
+    driver.start(id)    --lua-socket.c文件
+    return connect(id, func)
+end
+
+通过 driver 看到 socket_server_start()中的 send_request()【工作线程】 --- 直接搜'R'，到socket_server.c文件，看ctrl_cmd()中的R【网络线程】 --- resume_socket()
+【一般agent是工作线程，一般有一个单独的网络线程，许多工作线程是通过 管道(pipeline) 把数据发送到网络线程来处理的】
+
+static int resume_socket()
+{
+    int id = request->id;  //id就是clientfd
+    result->id = id;
+    result->opaque = request->opaque;    //opaque就是具体指向的actor
+    ...
+    struct socket *s = &ss->slot[HASH_ID(id)];   //opaque会传到s中
+    ...
+    if(enable_read(ss, s, true)) {...}   //关键
+    ...
+}
+
+enable_read() --- sp_enable()  //监听读事件
+
+static int sp_enable()
+{
+    struct epoll_event ev;
+    ...
+    ev.data.ptr = ud;  //opaque，resume_socket()中创建的socket s   里面有clientfd、actor的地址
+    if(epoll_ctl(efd, EPOLL_CTL_MOD, sock, &ev) == -1) {...}   //重点是&ev，通过epoll_ctl把&ev传到网络当中
+
+    //epoll_ctl是系统调用，操作的是linux内核中epoll的红黑树， 把actor的地址传到红黑树的节点当中
+    //未来事件&ev被触发时，会把数据拷贝到就绪队列(内核)，然后通过epoll_wait把事件取出来，从内核拷贝到用户态，从中找到actor的地址，自然就可以知道消息要发送给哪一个actor
+    ...
+}
+
+
+
+```
+
+2 actor是如何调度的    <br>
+
+
