@@ -128,6 +128,66 @@ static int sp_enable()
 
 
 2 actor是如何调度的    <br>
-线程池的调度  <br>
+线程池的调度，线程池用来调度actor  <br>
+
+例：一个网络线程、一个定时线程、线程池、全局队列、多个actor(actor里有消息队列)   <br>
+线程池只作用在全局消息队列   <br>
+全局消息队列组织的数据是 活跃的(有消息的)actor的消息队列，也就是说，全局消息队列中的元素实际上指向actor消息队列的指针  <br>
+线程池的工作原理：不断的从全局消息队列中取出消息(actor的消息队列)。线程池中的一个线程会取出消息队列，然后从中取出一个消息，然后把消息作为参数传入回调函数中（以此驱动actor运行）。    <br>
+
+分析线程池：  <br>
+1、线程池中，生产者和消费者全部列举出来    <br>
+网络线程、定时线程产生的数据就是生产者    <br>
+线程池即使消费者，也是生产者(actor之间发送消息)  <br>
+
+```
+源码：skynet_start.c
+thread_worker() --- skynet_context_message_dispatch()【skynet_server.c】
+struct message_queue * skynet_context_message_dispatch()
+{
+    ...
+    q = skynet_globalmq_pop();  //从全局消息队列中取出actor的消息队列
+    ...
+    uint32_t handle = skynet_mq_handle(q);  //取出actor的句柄
+    struct skynet_context * ctx = skynet_handle_grab(handle);  //通过句柄找到运行环境(上下文)
+    ...
+    if(skynet_mq_pop(q, &msg)){}  //通过上下文，从消息队列中去取消息&msg
+    ...
+    dispatch_message(ctx, &msg);  //分发消息，把msg分发到actor的上下文中
+    ...
+}
+
+static void dispatch_message()  //skynet_server.c
+{
+    ...
+    reserve_msg = ctx->cb(ctx, ...);  //callback回调函数，运行环境是ctx(actor)，msg作为参数，驱动actor运行
+    ...
+}
+```
+
+2、线程池是怎么唤醒的？怎么休眠的？    <br>
+```
+//【skynet_start.c】
+
+休眠(挂起)：
+thread_worker()   
+{
+    ...
+    pthread_cond_wait(&m->cond, &m->mutex);  //参数：条件变量，互斥锁  两个互相搭配使用
+    ...
+}
+
+唤醒：
+定时线程：  thread_timer() --- skynet_updatetime()【skynet_timer.c】 --- timer_update()  //执行定时任务，产生消息
+                        --- wakeup()
+static void wakeup()
+{
+    pthread_cond_signal();  //发送一个signal，从pthread_cond_wait处唤醒
+}
+
+网络线程：  thread_socket() --- wakeup()
+
+线程池中的线程：不需要 唤醒线程池线程，原因是 线程池既是生产者又是消费者， 当一个线程使actor发送消息给另一个actor时，没必要自己休眠去唤醒另一个线程(多了两次系统调用)，这个线程等执行完毕后，直接自己去取另一个actor消息队列中的消息执行就可以了。
+```
 
 
