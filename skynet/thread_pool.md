@@ -26,17 +26,74 @@ redis业务处理(命令处理)是 **单线程**    <br>
 5 得到命令处理结果，加密协议    <br>
 6 发送处理结果     <br>
 
-io线程池主要处理2、3(read)步，5、6(write(send))步的问题，read()、write()是系统调用，会涉及io操作。       <br>
+io线程池主要处理2、3(read)步，5、6(write(send))步的问题，read()、write()是系统调用，会涉及io操作。第4步都是在主线程中处理。       <br>
 
 【ps：内核协议栈专门处理网络数据。首先 网卡 接收到网络数据(bit数字)，通过 网卡驱动 写入到环形缓冲区(在内核)，然后网卡驱动会从环形缓冲区读数据，读完后按照TCP/IP协议栈依次往内核协议栈(在内核)传数据——具体来说就是，首先数据链路层取出mac地址，到IP层，到TCP层，定位到具体的socket，每个socket都会有缓冲区，数据会写入缓冲区中。然后用户层会通过一些方式感知到内核的socket缓冲区中有数据，然后通过read()把数据读取出来，然后数据就会到达用户态，就可以进行处理了。】    <br>
 
-解决的问题：      <br>
-1 处理io      <br>
+全局队列的作用：收集io任务  <br>
+每个线程需要有一个队列：避免锁竞争  <br>
+主线程作为io线程的一部分：充分利用系统资源，主线程如果不处理io就会一直等待，直到其他io线程处理结束     <br>
 
 redis有一个主线程(负责命令处理)，当感知到数据时，先不进行2、3步。先把数据抛到io线程池，io线程池中有多个io线程(主线程也会作为线程池的一部分，参与线程池的工作)。    <br>
 详细来说就是，主线程会把数据先放入 全局队列，接下来每个io线程都会准备一个队列，然后在全局队列当中进行负载均衡(全局队列中的任务分配到io线程的队列中，采用round-robin(时间片轮转（RR）调度算法，抢占式CPU调度算法)的方式进行分配)   <br>
 
 ```
+aemain()【ae.c】  网络处理的事件循环 ---> aeProcessEvents()  处理事件
+int aeProcessEvents()
+{
+    ...
+    //numevents  同时感知多少事件。以fd为单位，同时有多少条连接，最多就能感知多少个事件
+    numevents = aeApiPoll(...); //io多路复用的封装，感知具体io的就绪事件(比如客户端发送的数据)，对应linux系统的epoll
+    ...
+    fe = &eventLoop->events[fd];
+    ...
+    fe->rfileProc(...); //触发读的回调，这里面进行2、3步
+    ...
+}
+
+createClient()【networking.c】  客户端与服务器连接后，服务器接收连接，创建Client，并设置读的回调。 ---> readQueryFromClient() 读的回调
+{
+    ...
+    if (postponeClientRead(c)) return; //如下所示
+    ...
+    nread = connRead(...); //对应第2步，读客户端发送的命令，调用read()，从协议栈中把数据读到用户态
+    ...
+    if (processInputBuffer(c) == C_ERR) {...} //对应第3步，进行协议解析
+    //processInputBuffer()方法中的 processInlineBuffer()、processMultibulkBuffer() 负责解析协议
+    ...
+}
+【注：执行redis具体命令的方法中，有setGenericCommand()，负责第5、6步】
+
+int postponeClientRead() 如果开启了io多线程，在这个接口中收集连接，放到全局队列中
+{
+    ...
+    listAddNodeHead(server.clients_pending_read, c);//clients_pending_read是全局队列，c是连接
+    ...
+}
+
+int handleClientsWithPendingReadsUsingThreads()   把全局队列中的连接数据分发到io线程队列
+{
+    ...
+    int target_id = item_id % server.io_threads_num; //通过取余的方式，也就是rr调度算法来分配
+    listAddNodeTail(io_threads_list[target_id], c); //io_threads_list是数组，就是io线程的队列，
+                                                    //将全局队列中的任务，依次分配给每个io线程的队列当中
+    ...
+}
+【注：io_threads_list[0]是主线程，主线程也会作为io线程，去处理一部分任务，处理完后等待其他io线程处理结束】
+
+
+io线程入口函数：
+void *IOThreadMain()
+{
+    ...
+    if (getIOPendingCount(id) != 0) break; //发现队列中有任务
+    ...
+    listRewind(io_threads_list[id], &li); //分别把任务取出来，开始执行任务
+    ...
+    setIOPendingCount(id, 0); //io线程已经完成任务，阻塞io线程
+    //之后就把执行权让给主线程，让主线程执行命令了
+}
+
 ```
 
 
