@@ -72,6 +72,33 @@ hall进程(actor)，实现匹配规则，准备一个队列，每次有用户准
 room进程(actor)，实现游戏规则，把三个玩家放到房间，生成需要玩家猜的随机数，随机某个人开始猜数字；实现猜数字逻辑；处理掉线、上线的情况。】   <br>
 
 
+怎么实现业务逻辑的分发？   <br>
+1 网络协程 不断从协程中拿取网络数据   <br>
+2 根据命令查表的方式分发业务逻辑    <br>
+
+```
+agent.lua
+skynet.start(function()
+    skynet.fork(process_socket_events)  --启动一个协程，专门用来处理网络交互命令
+end)
+
+function process_socket_events()   --网络协程
+    local data = socket.readline(clientfd)  --不断从连接中取网络数据
+    --接下来就是以空格作为分割符，分割data取命令cmd和参数，根据cmd调用到相应的方法
+    skynet.fork(CMD[cmd], ...)  --分发逻辑，根据cmd调用对应的方法
+end
+
+【注：actor之间的消息发送（如：agent向hall发送消息）
+skynet.send()  不需要知道结果
+skynet.call()  需要知道结果
+
+例：
+【agent】skynet.call(hall, "lua", "ready", client)
+【hall】skynet.dispatch("lua", function(session, address, cmd, ...)   --接收其他actor发送过来的消息
+end)
+】
+```
+
 其他：   <br>
 Actor - 本质上是做功能抽象  <br>
 优化：当玩家多时，一个actor处理多个连接(玩家)，根据不同的客户端id，创建结构来存储玩家数据；一个actor处理多个房间    <br>
