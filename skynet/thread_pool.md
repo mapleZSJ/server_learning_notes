@@ -96,6 +96,51 @@ void *IOThreadMain()
 
 ```
 
+怎么管理io线程池：用互斥锁   <br>
+
+```
+void initThreadedIO() 【networking.c】    //io线程池初始化
+{
+    ...
+    pthread_mutex_lock(&io_threads_mutex[i]);//加锁，每一个线程都有专属的锁
+    ...
+}
+
+void startThreadedIO()    //开启io线程，主要由 主线程 调用
+{
+    ...
+    pthread_mutex_unlock(&io_threads_mutex[j]);//释放锁，io线程就可以开始运行
+    ...
+}
+
+void stopThreadedIO()    //关闭io线程，主要由 主线程 调用
+{
+    ...
+    pthread_mutex_lock(&io_threads_mutex[j]);//加互斥锁
+    ...
+}
+
+void *IOThreadMain()
+{
+    ...
+    while(1) {
+        ...
+        if (getIOPendingCount(id) == 0) {        //io线程
+            pthread_mutex_lock(&io_threads_mutex[id]); //当主线程通过stopThreadedIO()持有互斥锁时，io线程在这里发生 阻塞
+            pthread_mutex_unlock(&io_threads_mutex[id]);
+            continue;
+        }
+        ...
+    }
+    ...
+    listRewind(io_threads_list[id], &li); //分别把任务取出来，开始执行任务
+    ...
+}
+
+
+```
+
+
 
 ### skynet 线程池工作原理以及解决的问题
 
