@@ -29,4 +29,44 @@ acceptor每一个线程都会有_newsockets数组，采用负载均衡算法，�
 
 msg queue中有部分数据（就是地图中实现的功能所发送的数据包）会路由到map线程，有一个map queue(里面存放服务器加载的多少块地图)，由map线程不断从map queue中取出map对象并执行对应的功能。map线程发送数据时，也会将数据放入msg queue per conn队列当中。【因为msg queue per conn队列是每一条连接对应一个队列，所以如果是某一个连接的消息，会路由到那条连接对应的队列当中。】
 
+```
+worldserver/Main.cpp
+extern int main()
+{
+    //注：在boost.asio中核心的对象是IoContext（相当于reactor模型中的reactor对象）
+    //看acceptor线程
+    std::shared_ptr<Trinity::ThreadPool> threadPool = std::make_shared<Trinity::ThreadPool>(numThreads);//创建一个线程池
+    for (int i = 0; i < numThreads; ++i)
+        threadPool->PostWork([ioContext]() {ioContext->run();});//线程池对应的都是一个ioContext，就是在这里处理acceptor，用来接收连接
+}
 
+Networking/AsyncAcceptor.h  异步接收连接（就是在上述线程池中设置的）
+
+
+Networking/NetworkThread.h  读写数据
+void run()
+{
+    _updateTimer.async_wait([this](boost::system::error_code const&) {Update();});//每隔一毫秒执行一次Update()
+
+    _newSockets.clear();//把newSockets放到sockets里面
+    _sockets.clear();
+}
+
+void Update()
+{
+    if (!sock->Update()) {} //不断地从具体连接中读取数据，在这里接收完数据之后，会把数据放入msg queue当中
+}
+
+
+主线程怎么从消息队列当中取出消息去处理：
+
+
+```
+
+弊端：   <br>
+1 main线程没做任何事，在阻塞等待，其实main线程可以作为map线程组的一部分（具体参考redis）    <br>
+2 map线程不安全，当其中一个map线程业务逻辑出错时，可能会导致整个进程宕机（map多进程处理更优，进程的健壮性比线程高）  <br>
+
+
+
+### 如何驱动地图模块中的数据
